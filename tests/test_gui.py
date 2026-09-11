@@ -1,0 +1,40 @@
+import os
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import unittest
+from PySide6.QtWidgets import QApplication
+from arm_controller.app import Window
+from arm_controller.protocol import Controller, DemoTransport
+
+
+class GuiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_demo_slider_release_and_stop(self):
+        window = Window()
+        try:
+            now = [0.0]
+            clock = lambda: now[0]
+            device = DemoTransport(clock)
+            window.controller = c = Controller(device, clock=clock)
+            for _ in range(12):
+                now[0] += .3
+                window.tick()
+            self.assertFalse(window.rows[0].slider.isEnabled())
+            c.set_zero()
+            c.arm()
+            window.render()
+            self.assertTrue(window.rows[0].slider.isEnabled())
+            window.rows[0].slider.setValue(100)
+            self.assertFalse(c.moving, "Changing the slider should not stream commands")
+            self.assertEqual(window.rows[0].value.value(), 10)
+            window.rows[0].slider.sliderReleased.emit()
+            self.assertTrue(c.moving)
+            self.assertFalse(window.rows[1].slider.isEnabled())
+            window.stop_button.click()
+            self.assertFalse(c.armed)
+            self.assertEqual(device.target, device.position)
+        finally:
+            window.close()
