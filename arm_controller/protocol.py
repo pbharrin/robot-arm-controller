@@ -40,6 +40,13 @@ class Controller:
         self.last_poll = -math.inf
         self.deadline = clock() + 2.0  # Arduino USB opening may reset the board.
         self.ack_time = None
+        self.operation = None
+
+    @property
+    def can_recover(self):
+        return (self.phase == "ready" and not self.error and self.state in ("Alarm", "Idle")
+                and not self.pending and not self.moving and self.position is not None
+                and self.clock() - self.last_status < 2)
 
     @property
     def idle(self):
@@ -61,13 +68,16 @@ class Controller:
         if self.pending:
             raise ValueError("A command is still awaiting acknowledgement")
         self.pending = kind
-        self.deadline = self.clock() + 5
+        self.deadline = self.clock() + (180 if kind == "home" else 5)
         self.write(data)
 
     def fail(self, message):
+        if self.error:
+            return  # Keep the first diagnostic rather than replacing it on timeout/reset.
         if not self.error:
             try:
-                self.write(b"\x85!")  # Cancel jog, or hold any unexpected non-jog motion.
+                # Homing only responds to reset, not jog cancel or feed hold.
+                self.write(b"\x18" if self.operation == "home" else b"\x85!")
             except (OSError, ValueError):
                 pass
             self.log(message)
@@ -75,6 +85,9 @@ class Controller:
         self.armed = False
         self.origin = None
         self.phase = "fault"
+        self.pending = None
+        self.moving = False
+        self.operation = None
 
     def tick(self):
         if self.phase == "closed":
@@ -97,7 +110,8 @@ class Controller:
             if self.phase != "boot" and now - self.last_poll >= .25:
                 self.write(b"?")
                 self.last_poll = now
-            if self.phase == "ready" and now - self.last_status >= 2:
+            # This firmware does not service status queries inside its homing loop.
+            if self.phase == "ready" and self.pending != "home" and now - self.last_status >= 2:
                 self.fail("Position reports stopped. Motion disabled; reconnect.")
         except (OSError, ValueError) as exc:
             self.fail(str(exc))
@@ -123,7 +137,12 @@ class Controller:
         elif line.startswith("<") and line.endswith(">"):
             fields = line[1:-1].split("|")
             self.state = fields[0]
-            if self.state.split(":")[0] in ("Alarm", "Door", "Hold", "Sleep", "Check"):
+            if self.state == "Alarm":
+                # Alarm status is also the normal power-on homing lock. Finish the
+                # read-only handshake so explicit recovery remains available.
+                self.armed = False
+                self.origin = None
+            if self.state.split(":")[0] in ("Door", "Hold", "Sleep", "Check"):
                 self.fail(f"Controller is in {self.state}. Resolve the cause and reconnect.")
                 return
             values = dict(field.split(":", 1) for field in fields[1:] if ":" in field)
@@ -134,6 +153,7 @@ class Controller:
             if (self.moving and not self.pending and self.ack_time is not None
                     and self.last_poll > self.ack_time and self.state == "Idle"):
                 self.moving = False
+                self.operation = None
         elif line == "ok":
             kind, self.pending = self.pending, None
             if kind == "settings":
@@ -151,8 +171,27 @@ class Controller:
                     self.phase = "ready"
                     # Allow first fresh position report two seconds to arrive.
                     self.last_status = self.clock()
-            elif kind == "jog":
+            elif kind in ("jog", "unlock", "home"):
                 self.ack_time = self.clock()
+                if kind == "home":
+                    self.last_status = self.clock()  # Allow fresh post-homing report.
+
+    def recover(self, kind):
+        if kind not in ("unlock", "home") or not self.can_recover:
+            raise ValueError("Wait for the connection checks and a fresh Idle/Alarm report")
+        if kind == "unlock" and self.state != "Alarm":
+            raise ValueError("The controller is not alarm-locked")
+        if kind == "home" and self.settings.get("$22") != "1":
+            raise ValueError("Homing is not enabled in the firmware ($22=1 required)")
+        self.armed = False
+        self.origin = None
+        self.moving = True
+        self.operation = kind
+        self.ack_time = None
+        try:
+            self.command(b"$H\n" if kind == "home" else b"$X\n", kind)
+        except (OSError, ValueError) as exc:
+            self.fail(str(exc))
 
     def set_zero(self):
         if not self.idle:
@@ -171,6 +210,7 @@ class Controller:
             raise ValueError("Motion is disabled or another move is in progress")
         data = jog_command(axis, angle, self.origin[AXES.index(axis)], feed)
         self.moving = True
+        self.operation = "jog"
         self.ack_time = None
         try:
             self.command(data, "jog")
@@ -179,6 +219,9 @@ class Controller:
 
     def stop(self):
         self.armed = False
+        if self.operation == "home":
+            self.fail("Homing aborted with reset. Reconnect and establish zero again.")
+            return
         try:
             self.write(b"\x85!")
         except (OSError, ValueError) as exc:

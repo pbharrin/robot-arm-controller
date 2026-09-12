@@ -30,7 +30,8 @@ Python/Qt toolchain; the current pinned Qt version requires macOS 12 or later.
    Use **Refresh** after plugging in a device.
 3. Click **Connect**. The app waits for startup, reads settings, checks the six-axis
    firmware identity, and polls machine position. It does not move on connection.
-4. At your chosen reference pose, click **Use current pose as zero** and confirm
+4. If it says **controller locked**, use the recovery controls described below.
+   At your chosen reference pose, click **Use current pose as zero** and confirm
    the calibration requirement. This captures a local reference; it does not move,
    home, or change the Arduino's coordinate offsets.
 5. Click **Enable motion**. Drag an X, Y, Z, A, B, or C slider and release to move
@@ -74,8 +75,37 @@ The app reads but never changes EEPROM settings. It requires:
 - Six finite machine-position values in every accepted position report.
 
 If a setting is incompatible, the app explains what to configure using your GRBL
-setup tool before reconnecting. It does not automatically unlock alarms or home
-the arm: the release's default homing configuration does not home all six axes.
+setup tool before reconnecting. It never automatically unlocks or homes the arm.
+
+### Startup alarm lock and recovery
+
+With homing enabled (`$22=1`), a normal startup can announce
+`[MSG:'$H'|'$X' to unlock]` and report `<Alarm|MPos:…>`. This is not a USB failure.
+The app completes the `$$` / `$I` handshake while locked and keeps sliders disabled.
+
+- **Home configured axes…** sends `$H` only after confirmation. It moves the arm;
+  verify sensor wiring, directions, and clear travel first. The linked v2 source
+  defaults to Z followed by X/Y, with A/B/C excluded from the default cycle.
+  Your flashed firmware determines the actual sequence. No automatic all-six-axis
+  homing or configuration change is attempted.
+- **Unlock without homing…** sends `$X` only after confirmation. This does not
+  move or home the arm and does not establish valid machine coordinates. It is
+  intended for controlled commissioning, not a substitute for homing. Soft limits
+  remain in force and may reject moves from an unhomed position.
+- Both actions clear session zero and require a new post-acknowledgement Idle
+  report, then **Use current pose as zero** and **Enable motion** before jogging.
+- Homing can take up to three minutes before acknowledgement. This firmware does
+  not service status queries during its homing loop, so the normal two-second
+  report watchdog is suspended only while `$H` is pending. The homing timeout
+  triggers a reset. **Stop/Esc during homing sends Ctrl-X (reset)**, because feed
+  hold and jog cancellation do not abort this firmware's homing routine. Reconnect
+  after aborting. Outside homing, Stop retains jog-cancel/feed-hold behavior.
+- Explicit `ALARM:n` errors (including failed homing), command errors, and transport
+  failures still disable motion and require resolving the cause and reconnecting.
+
+If your settings show `$20=1`, soft limits are enabled. `$21=0` means hard limits
+are disabled, even if Hall sensors are physically installed. The app does not
+change either setting or assume the sensors already provide hard-limit protection.
 
 Example: with captured X machine coordinate 12°, requesting slider X = +5° sends:
 
@@ -95,7 +125,7 @@ jog-cancel byte `0x85` followed by feed hold `!`.
   model of collisions or each joint's physical travel.
 - Hall sensors must be wired and configured as effective limits in the firmware.
   Their presence alone does not establish hard-limit protection. The app preserves
-  firmware limits and never sends alarm unlock or disables them.
+  firmware limits and never disables them. Alarm unlock is an explicit confirmed action.
 - A software stop is not a physical emergency stop or motor power cutoff. USB
   loss can prevent it reaching the board. Use the arm's physical stop for that case.
 - Controller reset, alarm, communication error, invalid position, or stale reports
@@ -133,7 +163,8 @@ No Apple developer certificate is embedded.
 python -m unittest discover -s tests -v
 ```
 
-Tests cover all six command letters, bounds, non-finite values, session zero,
+Tests cover startup-lock handshake ordering, confirmed recovery, homing stop/timeouts,
+all six command letters, bounds, non-finite values, session zero,
 firmware/settings checks, serial fragmentation, acknowledgement/completion ordering,
 stop and reset behavior, missing reports, command timeouts, unplug/partial-write
 failures, and a Qt demo slider interaction. The simulated device does not validate

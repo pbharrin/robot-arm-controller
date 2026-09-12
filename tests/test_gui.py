@@ -2,6 +2,8 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import unittest
+from unittest.mock import patch
+from PySide6.QtWidgets import QMessageBox
 from PySide6.QtWidgets import QApplication
 from arm_controller.app import Window
 from arm_controller.protocol import Controller, DemoTransport
@@ -36,5 +38,27 @@ class GuiTests(unittest.TestCase):
             window.stop_button.click()
             self.assertFalse(c.armed)
             self.assertEqual(device.target, device.position)
+        finally:
+            window.close()
+
+    def test_locked_connection_recovery_confirmation(self):
+        window = Window()
+        try:
+            device = DemoTransport()
+            window.controller = c = Controller(device)
+            c.phase = "ready"
+            c.settings["$22"] = "1"
+            c.receive("<Alarm|MPos:0,0,0,0,0,0>")
+            window.render()
+            self.assertTrue(window.unlock_button.isEnabled())
+            self.assertTrue(window.home_button.isEnabled())
+            self.assertFalse(window.rows[0].slider.isEnabled())
+            with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Cancel):
+                window.unlock_button.click()
+            self.assertIsNone(c.pending)
+            with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+                window.unlock_button.click()
+            self.assertEqual(c.pending, "unlock")
+            self.assertFalse(window.home_button.isEnabled())
         finally:
             window.close()

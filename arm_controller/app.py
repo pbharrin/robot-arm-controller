@@ -100,6 +100,15 @@ class Window(QMainWindow):
         self.status.setObjectName("status")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+        recovery = QHBoxLayout()
+        self.home_button = QPushButton("Home configured axes…")
+        self.home_button.clicked.connect(lambda: self.recover("home"))
+        self.unlock_button = QPushButton("Unlock without homing…")
+        self.unlock_button.clicked.connect(lambda: self.recover("unlock"))
+        recovery.addWidget(self.home_button)
+        recovery.addWidget(self.unlock_button)
+        recovery.addStretch()
+        layout.addLayout(recovery)
         tools = QHBoxLayout()
         self.zero = QPushButton("Use current pose as zero")
         self.zero.clicked.connect(self.set_zero)
@@ -232,6 +241,39 @@ class Window(QMainWindow):
                 self.log(str(exc))
         self.render()
 
+    def recover(self, kind):
+        c = self.controller
+        if not c or not c.can_recover:
+            return
+        if kind == "home":
+            title = "Home configured axes"
+            message = (
+                "This sends $H and moves the arm toward its homing sensors.\n\n"
+                "Verify sensor wiring, homing directions, and clear travel first. The Arctos v2 "
+                "default cycle homes Z, then X/Y; it does not establish A/B/C home positions. "
+                "The axes moved depend on your firmware build.\n\n"
+                "Stop/Esc will reset the controller to abort homing. Start homing?"
+            )
+        else:
+            title = "Unlock without homing"
+            message = (
+                "This sends $X to clear the alarm lock without moving or homing the arm. "
+                "It does not establish valid machine coordinates.\n\n"
+                "Soft limits remain enabled if configured and may reject moves from an unhomed "
+                "position. Session zero does not replace machine homing. Use this only for "
+                "controlled commissioning with the physical position understood.\n\n"
+                "Motion stays disabled until you set session zero and enable it. Unlock?"
+            )
+        answer = QMessageBox.question(self, title, message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer == QMessageBox.StandardButton.Yes and self.controller is c:
+            try:
+                c.recover(kind)
+            except ValueError as exc:
+                self.log(str(exc))
+        self.render()
+
     def toggle_arm(self):
         if self.controller:
             if self.controller.armed:
@@ -268,6 +310,8 @@ class Window(QMainWindow):
         for widget in (self.ports, self.baud, self.refresh_button):
             widget.setEnabled(not connected)
         self.zero.setEnabled(bool(c and c.idle))
+        self.home_button.setEnabled(bool(c and c.can_recover and c.settings.get("$22") == "1"))
+        self.unlock_button.setEnabled(bool(c and c.can_recover and c.state == "Alarm"))
         self.enable.setEnabled(bool(c and (c.armed or (c.idle and c.origin is not None))))
         self.enable.setText("Disable motion" if c and c.armed else "Enable motion")
         self.stop_button.setEnabled(connected)
@@ -278,6 +322,12 @@ class Window(QMainWindow):
             text = c.error
         elif c.phase != "ready":
             text = "Connecting — verifying firmware and position reporting…"
+        elif c.operation == "home":
+            text = "Homing configured axes — Stop/Esc resets the controller to abort."
+        elif c.operation == "unlock":
+            text = "Unlock requested — waiting for a fresh Idle report."
+        elif c.state == "Alarm":
+            text = "Connected — controller locked. Home configured axes or explicitly unlock without homing."
         elif c.origin is None:
             text = f"{c.state} — use the current pose as zero to begin."
         elif c.moving:
