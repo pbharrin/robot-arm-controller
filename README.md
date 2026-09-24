@@ -67,7 +67,8 @@ example, Arctos COREBC). This app sends joint coordinates, not individual motor
 pulses or Cartesian/inverse-kinematics commands. Match the firmware release to
 your arm's mechanical version.
 
-The app reads but never changes EEPROM settings. It requires:
+The app reads EEPROM settings on connection. Only the explicit soft-limit control
+described below writes a setting; connection itself never changes settings. It requires:
 
 - `$13=0`: non-inch position reporting.
 - `$10` bit 0 enabled: machine position (`MPos`) in status reports. For example,
@@ -104,8 +105,33 @@ The app completes the `$$` / `$I` handshake while locked and keeps sliders disab
   failures still disable motion and require resolving the cause and reconnecting.
 
 If your settings show `$20=1`, soft limits are enabled. `$21=0` means hard limits
-are disabled, even if Hall sensors are physically installed. The app does not
-change either setting or assume the sensors already provide hard-limit protection.
+are disabled, even if Hall sensors are physically installed. The app never changes
+`$21` or assumes the sensors already provide hard-limit protection.
+
+### Positive X during manual commissioning (no limit switches)
+
+The firmware's default soft-limit interval is negative machine coordinates up to
+zero. Thus a jog to machine X=+1 is rejected with error 15 while `$20=1`.
+For manual commissioning before homing/limit switches are installed:
+
+1. Connect and finish the firmware checks. Unlock without homing if required;
+   do not run homing without working sensors.
+2. Click **Disable soft limits…** and review the confirmation. This writes `$20=0`
+   for **all six axes**, then reads `$$` to verify the change. Motion is disarmed
+   and session zero cleared; wait for the fresh position report.
+3. Use the current pose as zero, enable motion, and test a small positive X target
+   such as +0.1 at low speed. The angle label is accurate only after steps-per-degree
+   calibration. Watch the arm and keep motor power cutoff within reach.
+4. A persistent **SOFT LIMITS OFF** indicator shows the setting. Use **Enable soft
+   limits…** to write and verify `$20=1` again when appropriate. GRBL requires
+   `$22=1` to enable them; effective protection also requires correct homing and travel
+   calibration. Re-enabling does not home or move the arm.
+
+**This is an EEPROM setting:** it remains disabled after disconnects, app closure,
+resets, and power cycles until explicitly re-enabled. The app does not silently
+restore it. With no physical limit switches and soft limits off, neither the ±180°
+slider range nor session zero protects against mechanical stops or collisions.
+This control does not change motor direction, steps-per-degree, or homing settings.
 
 Example: with captured X machine coordinate 12°, requesting slider X = +5° sends:
 
@@ -124,8 +150,8 @@ jog-cancel byte `0x85` followed by feed hold `!`.
 - The ±180° slider range is a requested target range around session zero, not a
   model of collisions or each joint's physical travel.
 - Hall sensors must be wired and configured as effective limits in the firmware.
-  Their presence alone does not establish hard-limit protection. The app preserves
-  firmware limits and never disables them. Alarm unlock is an explicit confirmed action.
+  Their presence alone does not establish hard-limit protection. Soft-limit changes
+  and alarm unlock are explicit confirmed actions; hard-limit settings are unchanged.
 - A software stop is not a physical emergency stop or motor power cutoff. USB
   loss can prevent it reaching the board. Use the arm's physical stop for that case.
 - Controller reset, alarm, communication error, invalid position, or stale reports

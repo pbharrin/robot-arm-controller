@@ -62,3 +62,26 @@ class GuiTests(unittest.TestCase):
             self.assertFalse(window.home_button.isEnabled())
         finally:
             window.close()
+
+    def test_soft_limit_toggle_requires_confirmation_and_disarms(self):
+        window = Window()
+        try:
+            window.controller = c = Controller(DemoTransport())
+            c.phase = "ready"
+            c.settings.update({"$20": "1", "$22": "1"})
+            c.receive("<Idle|MPos:0,0,0,0,0,0>")
+            c.set_zero()
+            c.arm()
+            window.render()
+            with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Cancel):
+                window.limits_button.click()
+            self.assertIsNone(c.pending)
+            self.assertTrue(c.armed)
+            with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+                window.limits_button.click()
+            self.assertEqual(c.pending, "soft_limit_write")
+            self.assertFalse(c.armed)
+            self.assertFalse(window.rows[0].slider.isEnabled())
+            self.assertIn("verifying", window.limits_status.text())
+        finally:
+            window.close()

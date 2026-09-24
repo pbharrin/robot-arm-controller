@@ -109,6 +109,14 @@ class Window(QMainWindow):
         recovery.addWidget(self.unlock_button)
         recovery.addStretch()
         layout.addLayout(recovery)
+        limits = QHBoxLayout()
+        self.limits_status = QLabel("Soft limits: unknown")
+        self.limits_status.setWordWrap(True)
+        self.limits_button = QPushButton("Change soft limits…")
+        self.limits_button.clicked.connect(self.change_soft_limits)
+        limits.addWidget(self.limits_status, 1)
+        limits.addWidget(self.limits_button)
+        layout.addLayout(limits)
         tools = QHBoxLayout()
         self.zero = QPushButton("Use current pose as zero")
         self.zero.clicked.connect(self.set_zero)
@@ -241,6 +249,33 @@ class Window(QMainWindow):
                 self.log(str(exc))
         self.render()
 
+    def change_soft_limits(self):
+        c = self.controller
+        if not c or not c.can_recover or c.settings.get("$20") not in ("0", "1"):
+            return
+        enabled = c.settings["$20"] == "0"
+        if enabled:
+            message = ("Enable GRBL soft limits on all axes ($20=1)?\n\n"
+                       "Valid homing and travel settings are needed for these limits to protect the arm. "
+                       "This does not home the arm. The setting persists on the Arduino.")
+        else:
+            message = ("Disable GRBL soft limits on ALL axes for manual commissioning ($20=0)?\n\n"
+                       "This allows positive machine coordinates. Without installed limit switches, "
+                       "the controller cannot prevent travel into mechanical stops or collisions. "
+                       "The ±180° sliders are not physical travel protection, and degrees require verified calibration.\n\n"
+                       "Use small, slow test moves and keep motor power cutoff within reach. "
+                       "This setting persists through disconnects and power cycles until you explicitly re-enable it. "
+                       "Motion will be disabled and session zero cleared. Continue?")
+        answer = QMessageBox.question(self, "Enable soft limits" if enabled else "Manual commissioning",
+            message, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer == QMessageBox.StandardButton.Yes and self.controller is c:
+            try:
+                c.set_soft_limits(enabled)
+            except ValueError as exc:
+                self.log(str(exc))
+        self.render()
+
     def recover(self, kind):
         c = self.controller
         if not c or not c.can_recover:
@@ -310,6 +345,14 @@ class Window(QMainWindow):
         for widget in (self.ports, self.baud, self.refresh_button):
             widget.setEnabled(not connected)
         self.zero.setEnabled(bool(c and c.idle))
+        limit = c.settings.get("$20") if c else None
+        changing = bool(c and c.pending in ("soft_limit_write", "soft_limit_verify"))
+        self.limits_button.setEnabled(bool(c and c.can_recover and limit in ("0", "1")))
+        self.limits_button.setText("Enable soft limits…" if limit == "0" else "Disable soft limits…")
+        self.limits_status.setText("Soft limits: changing / verifying…" if changing else
+            "SOFT LIMITS OFF — all axes; persists on Arduino" if limit == "0" else
+            "Soft limits: ON" if limit == "1" else "Soft limits: unknown")
+        self.limits_status.setStyleSheet("color: #a33b00; font-weight: 700;" if limit == "0" else "")
         self.home_button.setEnabled(bool(c and c.can_recover and c.settings.get("$22") == "1"))
         self.unlock_button.setEnabled(bool(c and c.can_recover and c.state == "Alarm"))
         self.enable.setEnabled(bool(c and (c.armed or (c.idle and c.origin is not None))))

@@ -41,6 +41,7 @@ class Controller:
         self.deadline = clock() + 2.0  # Arduino USB opening may reset the board.
         self.ack_time = None
         self.operation = None
+        self.soft_limit_request = None
 
     @property
     def can_recover(self):
@@ -171,10 +172,35 @@ class Controller:
                     self.phase = "ready"
                     # Allow first fresh position report two seconds to arrive.
                     self.last_status = self.clock()
+            elif kind == "soft_limit_write":
+                self.settings.pop("$20", None)
+                self.command(b"$$\n", "soft_limit_verify")
+            elif kind == "soft_limit_verify":
+                if self.settings.get("$20") != self.soft_limit_request:
+                    self.fail("Soft-limit readback did not match. Reconnect to check the actual setting.")
+                else:
+                    self.log("Soft limits " + ("enabled" if self.soft_limit_request == "1" else
+                             "DISABLED on all axes") + "; setting saved on Arduino.")
+                    self.soft_limit_request = None
+                    self.position = None  # Require a fresh position after the settings transaction.
+                    self.last_status = self.clock()
             elif kind in ("jog", "unlock", "home"):
                 self.ack_time = self.clock()
                 if kind == "home":
                     self.last_status = self.clock()  # Allow fresh post-homing report.
+
+    def set_soft_limits(self, enabled):
+        if type(enabled) is not bool or not self.can_recover:
+            raise ValueError("Wait for a fresh Idle/Alarm report before changing soft limits")
+        if enabled and self.settings.get("$22") != "1":
+            raise ValueError("GRBL requires homing enabled ($22=1) to enable soft limits")
+        self.armed = False
+        self.origin = None
+        self.soft_limit_request = "1" if enabled else "0"
+        try:
+            self.command(f"$20={self.soft_limit_request}\n".encode("ascii"), "soft_limit_write")
+        except (OSError, ValueError) as exc:
+            self.fail(str(exc))
 
     def recover(self, kind):
         if kind not in ("unlock", "home") or not self.can_recover:
@@ -248,6 +274,7 @@ class DemoTransport:
         self.feed = 60.0
         self.output = bytearray(b"Grbl 1.1 demo\n")
         self.closed = False
+        self.soft_limits = "1"
 
     def advance(self):
         now = self.clock()
@@ -264,7 +291,10 @@ class DemoTransport:
             pos = ",".join(f"{x:.3f}" for x in self.position)
             self.output.extend(f"<{state}|MPos:{pos}>\n".encode())
         elif data == b"$$\n":
-            self.output.extend(b"$10=1\n$13=0\nok\n")
+            self.output.extend(f"$10=1\n$13=0\n$20={self.soft_limits}\n$22=1\nok\n".encode())
+        elif data in (b"$20=0\n", b"$20=1\n"):
+            self.soft_limits = chr(data[4])
+            self.output.extend(b"ok\n")
         elif data == b"$I\n":
             self.output.extend(b"[VER:1.1:DEMO]\n[AXS:6:XYZABC]\nok\n")
         elif data.startswith(b"$J="):
